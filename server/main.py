@@ -1,9 +1,11 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Any, Literal
 
 import os
 import hashlib
@@ -47,6 +49,29 @@ class RepoDownloadRequest(BaseModel):
 
 class ScanRequest(BaseModel):
     url: str
+
+
+class SourceReference(BaseModel):
+    file_path: str
+    start_line: int | None = None
+    end_line: int | None = None
+    snippet: str | None = None
+
+
+class AnswerExtras(BaseModel):
+    sources: list[SourceReference] = Field(default_factory=list)
+
+
+class StructuredAnswer(BaseModel):
+    type: Literal["markdown"] = "markdown"
+    text: str
+    extras: AnswerExtras = Field(default_factory=AnswerExtras)
+
+
+class AskResponse(BaseModel):
+    success: bool
+    answer: StructuredAnswer | None = None
+    error: str | None = None
 
 
 def make_hash(value):
@@ -146,32 +171,97 @@ def get_vectorstore():
     )
 
 
-@app.post("/api/repo/ask")
-def ask_repository(request: AskRequest):
+def extract_provider_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, list):
+        parts = [extract_provider_text(part) for part in value]
+        return "\n\n".join(part for part in parts if part)
+
+    if isinstance(value, dict):
+        text = value.get("text")
+        if isinstance(text, str):
+            return text.strip()
+
+        content = value.get("content")
+        if isinstance(content, (str, list, dict)):
+            return extract_provider_text(content)
+
+    return ""
+
+
+def normalize_sources(raw_sources: Any) -> list[SourceReference]:
+    if not isinstance(raw_sources, list):
+        return []
+
+    sources = []
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+
+        file_path = source.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            continue
+
+        snippet = source.get("content")
+        sources.append(SourceReference(
+            file_path=file_path.strip(),
+            snippet=snippet.strip() if isinstance(snippet, str) and snippet.strip() else None
+        ))
+
+    return sources
+
+
+def normalize_answer(raw_answer: Any) -> StructuredAnswer:
+    if isinstance(raw_answer, dict):
+        provider_content = raw_answer.get("content")
+        raw_sources = raw_answer.get("sources", [])
+    else:
+        provider_content = raw_answer
+        raw_sources = []
+
+    text = extract_provider_text(provider_content)
+    if not text:
+        raise ValueError("Gemini returned an empty answer")
+
+    return StructuredAnswer(
+        text=text,
+        extras=AnswerExtras(sources=normalize_sources(raw_sources))
+    )
+
+
+@app.post("/api/repo/ask", response_model=None)
+def ask_repository(request: AskRequest) -> AskResponse | JSONResponse:
     try:
         if not request.question.strip():
-            raise HTTPException(
+            return JSONResponse(
                 status_code=400,
-                detail="Question cannot be empty"
+                content=AskResponse(
+                    success=False,
+                    error="Question cannot be empty"
+                ).model_dump()
             )
 
         from generator import generate_answer
 
-        answer = generate_answer(request.question)
+        answer = normalize_answer(generate_answer(request.question))
 
-        return {
-            "success": True,
-            "question": request.question,
-            "answer": answer
-        }
+        return AskResponse(success=True, answer=answer)
 
-    except HTTPException:
-        raise
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=502,
+            content=AskResponse(success=False, error=str(exc)).model_dump()
+        )
 
     except Exception as e:
-        raise HTTPException(
+        return JSONResponse(
             status_code=500,
-            detail=str(e)
+            content=AskResponse(
+                success=False,
+                error=f"Unable to generate an answer: {e}"
+            ).model_dump()
         )
 
 

@@ -15,7 +15,10 @@ def generate_answer(question):
     chunks = retrieve_chunks(question)
 
     if not chunks:
-        return "No relevant code found in the codebase."
+        return {
+            "content": "No relevant code found in the codebase.",
+            "sources": []
+        }
 
     context = ""
 
@@ -46,4 +49,7 @@ USER QUESTION:
 
     response = model.invoke(prompt)
 
-    return response.content
+    return {
+        "content": response.content,
+        "sources": chunks
+    }

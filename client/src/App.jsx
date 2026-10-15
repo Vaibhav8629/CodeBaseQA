@@ -1,703 +1,199 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import ReactMarkdown from 'react-markdown';
+import rehypeHighlight from 'rehype-highlight';
+import remarkGfm from 'remark-gfm';
 import {
-  ArrowUpRight,
-  BookOpenText,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  CircleDot,
+  ArrowRight,
+  Check,
+  Code2,
   Copy,
-  FolderOpen,
+  ExternalLink,
   GitBranch,
-  MessageSquareText,
-  PanelRightOpen,
-  Plus,
-  Search,
-  SendHorizonal,
+  Globe2,
+  Layers3,
+  Menu,
+  MessageSquare,
+  Network,
+  PanelRight,
+  Send,
+  ShieldCheck,
   Sparkles,
-  TerminalSquare,
+  Terminal,
   X,
+  Zap,
 } from 'lucide-react';
+import { Link, Route, Routes, useNavigate } from 'react-router-dom';
+import { askRepository, connectRepository } from './services/api';
 
-const repoMeta = {
-  name: 'acme/platform',
-  branch: 'main',
-  status: 'Index ready',
-  files: 438,
-  symbols: 1842,
-  lastIndexed: '2 min ago',
-};
-
-const recentConversations = [
-  { title: 'How authentication works', time: '2h ago', active: true },
-  { title: 'Explain the API request flow', time: '1d ago', active: false },
-  { title: 'Where is the database connection configured?', time: '2d ago', active: false },
-  { title: 'How does error handling work?', time: '4d ago', active: false },
+const questions = [
+  { title: 'Explain Structure', text: 'Explain the structure of this codebase', icon: Layers3, tone: 'violet' },
+  { title: 'Auth Flow', text: 'How does authentication work?', icon: ShieldCheck, tone: 'rose' },
+  { title: 'Tech Stack', text: 'What technologies and libraries are used?', icon: Network, tone: 'blue' },
+  { title: 'Key Features', text: 'What are the main features of this application?', icon: Zap, tone: 'amber' },
 ];
 
-const exampleQuestions = [
-  'Explain the authentication flow',
-  'How are API routes organized?',
-  'Trace a request from frontend to database',
-  'Where is error handling implemented?',
+const features = [
+  { eyebrow: '01 / MAP', title: 'Interactive dependency graph', copy: 'See how modules connect before you make your first change.', icon: Network, tone: 'violet' },
+  { eyebrow: '02 / ASK', title: 'AI-powered codebase chat', copy: 'Get grounded answers that follow the paths your code actually takes.', icon: MessageSquare, tone: 'mint' },
+  { eyebrow: '03 / LEARN', title: 'Personalized learning paths', copy: 'Turn unfamiliar repositories into a focused, navigable curriculum.', icon: Layers3, tone: 'blue' },
+  { eyebrow: '04 / PRACTICE', title: 'Interactive coding challenges', copy: 'Build confidence by testing what you understand, not just reading it.', icon: Terminal, tone: 'amber' },
 ];
 
-const indexingStages = [
-  'Connecting to repository',
-  'Discovering source files',
-  'Parsing code structure',
-  'Preparing searchable code chunks',
-  'Index ready',
-];
-
-const sourceFiles = {
-  'src/server/auth.py': {
-    id: 'src/server/auth.py',
-    path: 'src/server/auth.py',
-    title: 'auth.py',
-    language: 'Python',
-    code: [
-      'def require_session(request: Request) -> UserContext:',
-      '    token = request.headers.get("authorization", "").replace("Bearer ", "")',
-      '    if not token:',
-      '        raise HTTPException(status_code=401, detail="missing token")',
-      '',
-      '    payload = decode_jwt(token)',
-      '    user = session_repo.get_by_id(payload["sub"])',
-      '    if not user or user.is_disabled:',
-      '        raise HTTPException(status_code=403, detail="user not authorized")',
-      '',
-      '    return UserContext(id=user.id, role=user.role, org_id=user.org_id)',
-      '',
-      'def decode_jwt(token: str) -> dict[str, Any]:',
-      '    return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])',
-    ],
-    range: { start: 28, end: 38 },
-  },
-  'src/api/router.ts': {
-    id: 'src/api/router.ts',
-    path: 'src/api/router.ts',
-    title: 'router.ts',
-    language: 'TypeScript',
-    code: [
-      'router.get("/projects/:projectId", async (req, res) => {',
-      '  const token = req.headers.authorization?.replace("Bearer ", "")',
-      '  const user = await auth.getCurrentUser(token)',
-      '  const project = await projectService.getProject(req.params.projectId)',
-      '',
-      '  if (!project || !user) {',
-      '    return res.status(404).json({ error: "Project not found" })',
-      '  }',
-      '',
-      '  const metrics = await analytics.fetchUsage(project.id, user.orgId)',
-      '  return res.json({ project, metrics, user })',
-      '})',
-      '',
-      'router.post("/projects", async (req, res) => {',
-      '  const payload = validateCreateProject(req.body)',
-      '  return res.status(201).json(await projectService.create(payload))',
-      '})',
-    ],
-    range: { start: 15, end: 29 },
-  },
-  'src/core/db.py': {
-    id: 'src/core/db.py',
-    path: 'src/core/db.py',
-    title: 'db.py',
-    language: 'Python',
-    code: [
-      'DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/platform")',
-      'engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)',
-      'SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)',
-      '',
-      'def get_db() -> Generator[Session, None, None]:',
-      '    db = SessionLocal()',
-      '    try:',
-      '        yield db',
-      '    finally:',
-      '        db.close()',
-      '',
-      'async def init_db() -> None:',
-      '    Base.metadata.create_all(bind=engine)',
-    ],
-    range: { start: 1, end: 14 },
-  },
-};
-
-function buildQuestionResponse(question) {
-  const normalized = question.toLowerCase();
-
-  if (normalized.includes('auth')) {
-    return {
-      sections: [
-        {
-          type: 'heading',
-          text: 'Authentication flow',
-        },
-        {
-          type: 'paragraph',
-          text:
-            'The platform validates a bearer token at the API edge and attaches request-scoped context before any project data is resolved. That pattern keeps the auth checks centralized and makes downstream services assume a trusted user identity.',
-        },
-        {
-          type: 'list',
-          items: [
-            'The request enters the FastAPI router with the Authorization header intact.',
-            'The middleware calls require_session and validates the JWT signature and expiry.',
-            'The session payload is mapped to a UserContext containing the user id, org id, and role.',
-            'Route handlers use that context to authorize access to project and analytics data.',
-          ],
-        },
-        {
-          type: 'code',
-          text: 'const token = req.headers.authorization?.replace("Bearer ", "")\nconst user = await auth.getCurrentUser(token)',
-        },
-      ],
-      citations: [
-        { id: 'src/server/auth.py', start: 28, end: 38, label: 'auth.py:28-38' },
-        { id: 'src/api/router.ts', start: 15, end: 29, label: 'router.ts:15-29' },
-      ],
-    };
-  }
-
-  if (normalized.includes('route') || normalized.includes('api')) {
-    return {
-      sections: [
-        {
-          type: 'heading',
-          text: 'API structure',
-        },
-        {
-          type: 'paragraph',
-          text:
-            'Routes are organized into thin endpoint modules that delegate work to domain services. This keeps request validation and auth logic in the HTTP layer while business behavior lives in service modules and repositories.',
-        },
-        {
-          type: 'list',
-          items: [
-            'The API layer defines request schemas and route bindings.',
-            'Service objects perform authorization checks and business transformations.',
-            'Persistence is isolated behind repository functions and database sessions.',
-          ],
-        },
-        {
-          type: 'code',
-          text: 'router.get("/projects/:projectId", async (req, res) => {\n  const project = await projectService.getProject(req.params.projectId)\n  return res.json({ project })\n})',
-        },
-      ],
-      citations: [
-        { id: 'src/api/router.ts', start: 15, end: 29, label: 'router.ts:15-29' },
-      ],
-    };
-  }
-
-  if (normalized.includes('database') || normalized.includes('request')) {
-    return {
-      sections: [
-        {
-          type: 'heading',
-          text: 'Request lifecycle',
-        },
-        {
-          type: 'paragraph',
-          text:
-            'A request is accepted by the API router, authenticated against the JWT session, then dispatched to the project service. Once the service has resolved the project, the database layer yields a scoped session that the analytics and repository functions can read from safely.',
-        },
-        {
-          type: 'list',
-          items: [
-            'Request validation happens before any DB touchpoints are opened.',
-            'The session context is passed through to the repository layer.',
-            'The database connection is closed after the response is sent.',
-          ],
-        },
-      ],
-      citations: [
-        { id: 'src/core/db.py', start: 1, end: 14, label: 'db.py:1-14' },
-        { id: 'src/api/router.ts', start: 15, end: 29, label: 'router.ts:15-29' },
-      ],
-    };
-  }
-
-  return {
-    sections: [
-      {
-        type: 'heading',
-        text: 'Error handling pattern',
-      },
-      {
-        type: 'paragraph',
-        text:
-          'The application centralizes failures in a small set of HTTP-exception and validation boundaries. That pattern gives consistent responses for missing resources, incomplete auth state, and invalid payloads while keeping service code cleaner.',
-      },
-      {
-        type: 'list',
-        items: [
-          'Validation failures are raised before database writes happen.',
-          'Auth middleware handles unauthorized access in a single place.',
-          'Resource lookups convert to explicit 404 and 403 responses.',
-        ],
-      },
-    ],
-    citations: [
-      { id: 'src/server/auth.py', start: 28, end: 38, label: 'auth.py:28-38' },
-      { id: 'src/api/router.ts', start: 15, end: 29, label: 'router.ts:15-29' },
-    ],
-  };
+function Brand({ light = false }) {
+  return <Link to="/" className={`brand ${light ? 'brand-light' : ''}`}><span className="brand-mark"><span>⌁</span></span><span>Codebase<span className="brand-accent">QA</span></span></Link>;
 }
 
-function App() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sourcePanelOpen, setSourcePanelOpen] = useState(true);
-  const [repoConnected, setRepoConnected] = useState(false);
-  const [repoUrl, setRepoUrl] = useState('https://github.com/acme/platform');
-  const [repoError, setRepoError] = useState('');
-  const [indexing, setIndexing] = useState(false);
-  const [indexingStep, setIndexingStep] = useState(0);
-  const [draft, setDraft] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [selectedSource, setSelectedSource] = useState(null);
+function Button({ children, variant = 'primary', ...props }) {
+  return <button className={`button button-${variant}`} type="button" {...props}>{children}</button>;
+}
 
-  useEffect(() => {
-    if (!indexing) {
-      return undefined;
-    }
-
-    if (indexingStep >= indexingStages.length - 1) {
-      const timer = setTimeout(() => {
-        setRepoConnected(true);
-        setIndexing(false);
-        setIndexingStep(indexingStages.length - 1);
-      }, 600);
-      return () => clearTimeout(timer);
-    }
-
-    const timer = setTimeout(() => {
-      setIndexingStep((previousStep) => previousStep + 1);
-    }, 700);
-
-    return () => clearTimeout(timer);
-  }, [indexing, indexingStep]);
-
-  const currentStatus = repoConnected
-    ? 'Index ready'
-    : indexing
-      ? indexingStages[indexingStep]
-      : 'Not connected';
-
-  const progress = repoConnected ? 100 : indexing ? ((indexingStep + 1) / indexingStages.length) * 100 : 0;
-
-  const handleConnectRepository = () => {
-    const trimmedUrl = repoUrl.trim();
-    const validPattern = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/)?$/;
-
-    if (!trimmedUrl || !validPattern.test(trimmedUrl)) {
-      setRepoError('Enter a valid GitHub repository URL, like https://github.com/acme/platform');
-      return;
-    }
-
-    setRepoError('');
-    setIndexing(true);
-    setRepoConnected(false);
-    setIndexingStep(0);
-    setSelectedSource(null);
-  };
-
-  const handleExampleQuestion = (question) => {
-    const response = buildQuestionResponse(question);
-
-    setMessages([
-      { role: 'user', text: question },
-      { role: 'assistant', text: response.sections, citations: response.citations },
-    ]);
-    setDraft('');
-    setSelectedSource(null);
-  };
-
-  const handleSend = () => {
-    const text = draft.trim();
-
-    if (!text) {
-      return;
-    }
-
-    const response = buildQuestionResponse(text);
-
-    setMessages([
-      { role: 'user', text },
-      { role: 'assistant', text: response.sections, citations: response.citations },
-    ]);
-    setDraft('');
-    setSelectedSource(null);
-  };
-
-  const openSource = (citation) => {
-    const file = sourceFiles[citation.id];
-
-    if (!file) {
-      return;
-    }
-
-    setSourcePanelOpen(true);
-    setSelectedSource({ ...citation, file });
-  };
-
-  const sourceFile = selectedSource?.file ?? null;
-
+function Landing() {
+  const navigate = useNavigate();
+  const [mobileOpen, setMobileOpen] = useState(false);
   return (
-    <div className="app-shell">
-      <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-        <div className="sidebar-header">
-          <div className="brand-wrap">
-            <div className="brand-mark" aria-hidden="true">
-              <span className="mark-left" />
-              <span className="mark-right" />
-            </div>
-            <div className="brand-copy">
-              <div className="brand-name">CodebaseQA</div>
-              <div className="brand-version">v0.1</div>
-            </div>
-          </div>
-          <button className="icon-button small" type="button" onClick={() => setSidebarCollapsed((value) => !value)}>
-            {sidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
-          </button>
+    <div className="landing">
+      <nav className="landing-nav">
+        <Brand />
+        <div className={`nav-links ${mobileOpen ? 'open' : ''}`}>
+          <a href="#features" onClick={() => setMobileOpen(false)}>Product</a>
+          <a href="#principles" onClick={() => setMobileOpen(false)}>Why CodebaseQA</a>
+          <a href="https://github.com" target="_blank" rel="noreferrer">GitHub <ExternalLink size={13} /></a>
+          <Button onClick={() => navigate('/workspace')}>Get started <ArrowRight size={15} /></Button>
         </div>
+        <button className="mobile-menu" type="button" aria-label="Toggle navigation" onClick={() => setMobileOpen((value) => !value)}>{mobileOpen ? <X /> : <Menu />}</button>
+      </nav>
 
-        <button className="new-chat-button" type="button" onClick={() => setMessages([])}>
-          <Plus size={16} />
-          <span>New Chat</span>
-          <kbd>⌘K</kbd>
-        </button>
-
-        <div className="search-box">
-          <Search size={14} />
-          <span>Search conversations</span>
-        </div>
-
-        <div className="sidebar-section">
-          <div className="section-label">Workspace</div>
-          <div className="workspace-card">
-            <div className="workspace-icon">
-              <FolderOpen size={16} />
-            </div>
-            <div className="workspace-details">
-              <div className="workspace-name">{repoMeta.name}</div>
-              <div className="workspace-branch">
-                <GitBranch size={12} />
-                <span>{repoMeta.branch}</span>
-              </div>
-            </div>
-            <div className="status-indicator success">
-              <CircleDot size={12} />
-            </div>
+      <main>
+        <section className="hero">
+          <div className="hero-orbit orbit-one" /><div className="hero-orbit orbit-two" />
+          <motion.div className="eyebrow-pill" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}> <span className="live-dot" /> Open-source code intelligence</motion.div>
+          <motion.h1 initial={{ opacity: 0, y: 22 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 }}>Understand any<br /><span className="gradient-text">codebase</span> with clarity.</motion.h1>
+          <motion.p className="hero-copy" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.16 }}>Stop searching blindly. Ask questions, trace architecture, and turn unfamiliar repositories into something you can confidently own.</motion.p>
+          <motion.div className="hero-actions" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }}>
+            <Button onClick={() => navigate('/workspace')}>Start learning <ArrowRight size={17} /></Button>
+            <a className="button button-secondary" href="https://github.com" target="_blank" rel="noreferrer"><GitBranch size={17} /> View on GitHub</a>
+          </motion.div>
+          <div className="trust-strip" id="principles">
+            <div><GitBranch size={16} /><strong>100% open source</strong><span>Inspect every layer</span></div>
+            <div><Globe2 size={16} /><strong>Run it locally</strong><span>Your code stays yours</span></div>
+            <div><ShieldCheck size={16} /><strong>Bring your keys</strong><span>No vendor lock-in</span></div>
           </div>
-        </div>
+        </section>
 
-        <div className="sidebar-section conversations">
-          <div className="section-label">Recent</div>
-          {recentConversations.map((conversation) => (
-            <button key={conversation.title} className={`conversation-item ${conversation.active ? 'active' : ''}`} type="button">
-              <span className="conversation-title">{conversation.title}</span>
-              <span className="conversation-time">{conversation.time}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="sidebar-footer">
-          <div className="profile-chip">
-            <div className="profile-avatar">AK</div>
-            <div className="profile-meta">
-              <strong>Alex Kim</strong>
-              <span>workspace owner</span>
+        <section className="feature-section" id="features">
+          <div className="section-intro"><span className="section-kicker">A better way in</span><h2>More than just a chatbot.</h2><p>Deep understanding needs more than text. Visualize structure, ask better questions, and learn at the speed of the code.</p></div>
+          <div className="feature-grid">
+            <div className="feature-hero-card">
+              <div className="graph-status-row"><span className="micro-badge"><span className="live-dot" /> Live analysis</span><span className="graph-mode">Monorepo mode</span><span className="graph-mode">9 language parsers</span></div>
+              <div className="feature-card-top"><span className="feature-icon violet"><Network /></span><button className="inspect-button" type="button">Inspect map <ArrowRight size={14} /></button></div>
+              <h3>Interactive Dependency Graph</h3><p>Don't just read code, map the system. Explore ownership boundaries, API traffic, and data flow with contextual nodes that mirror your real architecture.</p>
+              <div className="graph-visual">
+                <div className="graph-orbit" /><svg className="graph-connections" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line x1="50" y1="51" x2="50" y2="20" /><line x1="50" y1="51" x2="81" y2="35" /><line x1="50" y1="51" x2="19" y2="39" /><line x1="50" y1="51" x2="26" y2="73" /><line x1="50" y1="51" x2="79" y2="73" /></svg>
+                <span className="graph-node node-core"><strong>Core App</strong><small>12 domains</small></span><span className="graph-node node-workers"><strong>Workers</strong><small>Jobs</small></span><span className="graph-node node-api"><strong>API</strong><small>REST Routes</small></span><span className="graph-node node-ui"><strong>UI Layer</strong><small>React</small></span><span className="graph-node node-auth"><strong>Auth</strong><small>JWT + RBAC</small></span><span className="graph-node node-data"><strong>Storage</strong><small>Postgres</small></span>
+                <div className="graph-metrics"><span><strong>42</strong><small>COMPONENTS</small></span><span><strong>87</strong><small>API CALLS</small></span><span><strong>15</strong><small>DB TABLES</small></span><span><strong>4</strong><small>BOUNDED CONTEXTS</small></span></div>
+              </div>
+              <div className="feature-tags"><span>Service boundaries</span><span>Hotspot discovery</span><span>Schema relationships</span></div>
             </div>
+            <div className="feature-stack">{features.slice(1).map(({ title, copy, icon: Icon, tone, eyebrow }) => <motion.article whileHover={{ y: -4 }} key={title} className="small-feature"><div className={`feature-icon ${tone}`}><Icon /></div><span className="feature-eyebrow">{eyebrow}</span><h3>{title}</h3><p>{copy}</p><ArrowRight size={16} className="card-arrow" /></motion.article>)}</div>
           </div>
-        </div>
-      </aside>
-
-      <div className="main-panel">
-        <header className="topbar">
-          <div className="breadcrumb-wrap">
-            <span className="crumb">acme</span>
-            <ChevronRight size={12} />
-            <span className="crumb strong">platform</span>
-          </div>
-
-          <div className="topbar-icons">
-            <span className="branch-pill">
-              <GitBranch size={12} />
-              {repoMeta.branch}
-            </span>
-            <span className="status-pill active">
-              <span className="pulse-dot" />
-              {currentStatus}
-            </span>
-            <button className="source-toggle" type="button" onClick={() => setSourcePanelOpen((value) => !value)}>
-              <PanelRightOpen size={14} />
-              {sourcePanelOpen ? 'Sources on' : 'Sources off'}
-            </button>
-            <button className="icon-button" type="button" aria-label="Keyboard shortcuts">
-              <BookOpenText size={14} />
-            </button>
-          </div>
-        </header>
-
-        <main className="workspace">
-          {messages.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-mark">
-                <span className="shape shape-a" />
-                <span className="shape shape-b" />
-                <span className="shape shape-c" />
-              </div>
-
-              <h1>Understand any codebase.</h1>
-              <p>Ask questions. Trace logic. Navigate your code with confidence.</p>
-
-              {!repoConnected ? (
-                <div className="connect-card">
-                  <div className="card-header-row">
-                    <span className="tiny-label">Repository URL</span>
-                    <span className="tiny-status">Local preview</span>
-                  </div>
-                  <div className="connect-input-row">
-                    <input
-                      type="text"
-                      value={repoUrl}
-                      placeholder="https://github.com/acme/platform"
-                      onChange={(event) => setRepoUrl(event.target.value)}
-                    />
-                    <button type="button" className="primary-button" onClick={handleConnectRepository} disabled={indexing}>
-                      {indexing ? 'Indexing...' : 'Connect'}
-                    </button>
-                  </div>
-
-                  {repoError ? <div className="error-text">{repoError}</div> : null}
-
-                  <div className="example-link-row">
-                    <span>Example repo</span>
-                    <button type="button" className="link-button" onClick={() => setRepoUrl('https://github.com/acme/platform')}>
-                      github.com/acme/platform
-                    </button>
-                  </div>
-
-                  <div className="indexing-progress">
-                    <div className="progress-header">
-                      <span>{currentStatus}</span>
-                      <span>{Math.round(progress)}%</span>
-                    </div>
-                    <div className="progress-bar">
-                      <span style={{ width: `${progress}%` }} />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="repo-summary-card">
-                  <div className="repo-summary-head">
-                    <div>
-                      <div className="tiny-label">Repository ready</div>
-                      <strong>{repoMeta.name}</strong>
-                    </div>
-                    <CheckCircle2 size={18} />
-                  </div>
-                  <div className="repo-metrics">
-                    <div>
-                      <span>Files</span>
-                      <strong>{repoMeta.files}</strong>
-                    </div>
-                    <div>
-                      <span>Symbols</span>
-                      <strong>{repoMeta.symbols}</strong>
-                    </div>
-                    <div>
-                      <span>Updated</span>
-                      <strong>{repoMeta.lastIndexed}</strong>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div className="chip-grid">
-                {exampleQuestions.map((question) => (
-                  <button key={question} type="button" className="question-chip" onClick={() => handleExampleQuestion(question)}>
-                    {question}
-                  </button>
-                ))}
-              </div>
-
-              <div className="feature-hints">
-                <div>
-                  <Sparkles size={14} />
-                  <span>Source-grounded answers</span>
-                </div>
-                <div>
-                  <Search size={14} />
-                  <span>Code-aware search</span>
-                </div>
-                <div>
-                  <TerminalSquare size={14} />
-                  <span>File-level citations</span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="chat-shell">
-              <div className="message-stream">
-                {messages.map((message, index) => (
-                  <div key={`${message.role}-${index}`} className={`message-row ${message.role === 'user' ? 'user' : 'assistant'}`}>
-                    {message.role === 'assistant' ? (
-                      <div className="assistant-avatar">
-                        <Sparkles size={13} />
-                      </div>
-                    ) : null}
-
-                    <div className={`message-bubble ${message.role === 'user' ? 'user' : 'assistant'}`}>
-                      {message.role === 'user' ? (
-                        <div className="user-text">{message.text}</div>
-                      ) : (
-                        <>
-                          {message.text.map((block, blockIndex) => {
-                            if (block.type === 'heading') {
-                              return <h3 key={`${block.type}-${blockIndex}`}>{block.text}</h3>;
-                            }
-
-                            if (block.type === 'paragraph') {
-                              return <p key={`${block.type}-${blockIndex}`}>{block.text}</p>;
-                            }
-
-                            if (block.type === 'list') {
-                              return (
-                                <ul key={`${block.type}-${blockIndex}`}>
-                                  {block.items.map((item, itemIndex) => (
-                                    <li key={`${block.type}-${itemIndex}`}>{item}</li>
-                                  ))}
-                                </ul>
-                              );
-                            }
-
-                            return (
-                              <pre key={`${block.type}-${blockIndex}`}>
-                                <code>{block.text}</code>
-                              </pre>
-                            );
-                          })}
-
-                          {message.citations && message.citations.length > 0 ? (
-                            <div className="citation-row">
-                              {message.citations.map((citation) => (
-                                <button key={citation.label} type="button" className="citation-chip" onClick={() => openSource(citation)}>
-                                  {citation.label}
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-
-                          <div className="answer-toolbar">
-                            <button type="button" className="tool-button">
-                              <Copy size={12} />
-                              Copy
-                            </button>
-                            <button type="button" className="tool-button">
-                              <ArrowUpRight size={12} />
-                              Regenerate
-                            </button>
-                            <button type="button" className="tool-button">
-                              <MessageSquareText size={12} />
-                              Helpful
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="composer-wrap">
-                <div className="composer-box">
-                  <textarea
-                    rows={1}
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                    placeholder="Ask anything about this codebase…"
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault();
-                        handleSend();
-                      }
-                    }}
-                  />
-                  <div className="composer-footer">
-                    <span>Enter to send · Shift + Enter to add a new line</span>
-                    <button type="button" className="send-button" onClick={handleSend} disabled={!draft.trim()}>
-                      <SendHorizonal size={16} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </main>
-      </div>
-
-      {sourcePanelOpen ? (
-        <aside className="source-panel">
-          {sourceFile ? (
-            <>
-              <div className="source-header">
-                <div className="source-headline">
-                  <div className="source-breadcrumb">src / server / auth.py</div>
-                  <div className="source-title-row">
-                    <h3>{sourceFile.title}</h3>
-                    <span className="language-badge">{sourceFile.language}</span>
-                  </div>
-                </div>
-
-                <div className="source-header-actions">
-                  <button type="button" className="icon-button small" aria-label="Copy path">
-                    <Copy size={13} />
-                  </button>
-                  <button type="button" className="icon-button small" aria-label="Close panel" onClick={() => setSourcePanelOpen(false)}>
-                    <X size={13} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="source-meta-row">
-                <span>
-                  {selectedSource.start}-{selectedSource.end}
-                </span>
-                <span>Highlighted range</span>
-              </div>
-
-              <div className="code-viewer">
-                <div className="code-lines">
-                  {sourceFile.code.map((line, index) => {
-                    const lineNumber = index + 1;
-                    const isActive = lineNumber >= selectedSource.start && lineNumber <= selectedSource.end;
-
-                    return (
-                      <div key={`${sourceFile.id}-${lineNumber}`} className={`code-line ${isActive ? 'highlighted' : ''}`}>
-                        <span className="line-number">{lineNumber}</span>
-                        <code>{line || ' '}</code>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="source-empty">
-              <div className="source-empty-mark">
-                <MessageSquareText size={20} />
-              </div>
-              <h3>No source selected</h3>
-              <p>Click a citation in the answer to open the matching file and inspect the exact implementation context.</p>
-            </div>
-          )}
-        </aside>
-      ) : null}
+        </section>
+      </main>
+      <footer><Brand /><span>Built for curious engineers.</span><span>© 2026 CodebaseQA</span></footer>
     </div>
   );
 }
 
-export default App;
+function MarkdownAnswer({ content }) {
+  return <ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    rehypePlugins={[rehypeHighlight]}
+    components={{
+      a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+      code: ({ className, children, ...props }) => {
+        const isBlock = Boolean(className);
+        return isBlock
+          ? <pre><code className={className} {...props}>{children}</code></pre>
+          : <code className="inline-code" {...props}>{children}</code>;
+      },
+    }}
+  >
+    {content}
+  </ReactMarkdown>;
+}
+
+function Message({ message, onCopy }) {
+  return <motion.div className={`chat-message ${message.role}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+    {message.role === 'assistant' && <div className="assistant-badge"><Sparkles size={14} /></div>}
+    <div className="message-content">
+      {message.role === 'user'
+        ? <p>{message.content}</p>
+        : <><div className="assistant-label">Codebase AI</div><MarkdownAnswer content={message.content} />{message.sources?.length > 0 && <div className="source-list"><span>Retrieved context</span>{message.sources.map((source) => <button key={`${source.file_path}-${source.start_line ?? 'file'}`} type="button">{source.file_path}{source.start_line ? `:${source.start_line}${source.end_line ? `-${source.end_line}` : ''}` : ''}</button>)}</div>}<button className="copy-answer" type="button" onClick={() => onCopy(message.content)}><Copy size={13} /> Copy answer</button></>}
+    </div>
+  </motion.div>;
+}
+
+function Workspace() {
+  const [repoUrl, setRepoUrl] = useState('');
+  const [repo, setRepo] = useState(null);
+  const [status, setStatus] = useState('idle');
+  const [error, setError] = useState('');
+  const [draft, setDraft] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const connect = async (event) => {
+    event.preventDefault();
+    setError('');
+    setStatus('connecting');
+    try {
+      const result = await connectRepository(repoUrl);
+      setRepo({ url: repoUrl.trim(), ...result });
+      setStatus('ready');
+    } catch (requestError) {
+      setStatus('error');
+      setError(requestError.message);
+    }
+  };
+
+  const sendQuestion = async (question = draft) => {
+    const text = question.trim();
+    if (!text || status !== 'ready') return;
+    setDraft('');
+    setMessages((current) => [...current, { role: 'user', content: text }]);
+    setStatus('asking');
+    try {
+      const result = await askRepository(text);
+      setMessages((current) => [...current, { role: 'assistant', content: result.content, sources: result.sources }]);
+      setStatus('ready');
+    } catch (requestError) {
+      setError(requestError.message);
+      setStatus('ready');
+    }
+  };
+
+  const copyAnswer = async (text) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
+
+  return <div className="workspace-page">
+    <header className="workspace-nav"><Brand light /><div className="workspace-nav-center"><span className={`connection-dot ${status === 'ready' || status === 'asking' ? 'on' : ''}`} />{repo ? <><strong>{repoUrl.replace('https://github.com/', '')}</strong><span className="nav-divider">/</span><span className="muted">main</span></> : <span className="muted">No repository connected</span>}</div><div className="workspace-actions"><button type="button" className="panel-button" onClick={() => setPanelOpen((value) => !value)}><PanelRight size={15} /> Sources</button><Link to="/" className="leave-link">Exit <ArrowRight size={14} /></Link></div></header>
+    <div className="workspace-body">
+      <aside className={`workspace-side ${panelOpen ? 'visible' : ''}`}><div className="side-label">Repository</div><div className="repo-side-card"><Code2 size={17} /><div><strong>{repo ? repoUrl.replace('https://github.com/', '') : 'Connect a repository'}</strong><span>{repo ? `${repo.files_scanned ?? '—'} files indexed` : 'GitHub URL required'}</span></div></div>{repo && <div className="side-stats"><div><strong>{repo.files_scanned ?? '—'}</strong><span>files</span></div><div><strong>{repo.total_chunks ?? '—'}</strong><span>chunks</span></div></div>}<div className="side-note"><ShieldCheck size={15} /><span>Answers use your indexed repository context.</span></div></aside>
+      <main className="chat-main">
+        <AnimatePresence mode="wait">
+          {messages.length === 0 ? <motion.div key="welcome" className="welcome" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><div className="welcome-icon"><Sparkles /></div><span className="section-kicker">Codebase intelligence</span><h1>How can I help?</h1><p>Connect a repository, then ask anything about its architecture, flow, or features.</p><form className="connect-form" onSubmit={connect}><div className="input-wrap"><GitBranch size={17} /><input value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/owner/repository" aria-label="GitHub repository URL" /><button type="submit" disabled={status === 'connecting'}>{status === 'connecting' ? 'Indexing…' : repo ? 'Re-index' : 'Connect'} <ArrowRight size={15} /></button></div>{error && <div className="error-message">{error}<button type="button" onClick={() => setError('')}>Dismiss</button></div>}</form><div className="suggestion-grid">{questions.map(({ title, text, icon: Icon, tone }) => <button key={title} className="suggestion-card" type="button" onClick={() => { setDraft(text); if (status === 'ready') sendQuestion(text); }} disabled={!repo || status === 'asking'}><span className={`suggestion-icon ${tone}`}><Icon /></span><span><strong>{title}</strong><small>{text}</small></span><ArrowRight size={15} /></button>)}</div>{!repo && <span className="suggestion-hint">Connect a repository to unlock questions</span>}</motion.div> : <motion.div key="chat" className="chat-view" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>{messages.map((message, index) => <Message key={`${message.role}-${index}`} message={message} onCopy={copyAnswer} />)}{status === 'asking' && <div className="typing"><span /><span /><span /> Thinking through the codebase</div>}</motion.div>}
+        </AnimatePresence>
+        {repo && <form className="composer" onSubmit={(event) => { event.preventDefault(); sendQuestion(); }}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendQuestion(); } }} placeholder="Ask anything about this codebase…" rows={1} disabled={status === 'asking'} /><div className="composer-bottom"><span>Enter to send · Shift + Enter for a new line</span><button type="submit" disabled={!draft.trim() || status === 'asking'}><Send size={16} /></button></div></form>}
+        {copied && <div className="toast"><Check size={14} /> Copied to clipboard</div>}
+      </main>
+    </div>
+  </div>;
+}
+
+export default function App() {
+  return <Routes><Route path="/" element={<Landing />} /><Route path="/workspace" element={<Workspace />} /><Route path="*" element={<Landing />} /></Routes>;
+}
