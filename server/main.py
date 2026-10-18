@@ -10,10 +10,13 @@ from typing import Any, Literal
 import os
 import hashlib
 import git
+import re
+from collections import Counter, deque
 
 from chunker import scan_repository
 from config import CHROMA_COLLECTION, CHROMA_DIR, SERVER_DIR
 from dotenv import load_dotenv
+from dependency_graph import GraphAnalysisError, GraphStore, MAX_PREVIEW_LINES
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -37,6 +40,8 @@ REPOS_DIR = SERVER_DIR / "repos"
 
 REPOS_DIR.mkdir(parents=True, exist_ok=True)
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+GRAPH_DIR = SERVER_DIR / "graph_data"
+graph_store = GraphStore(GRAPH_DIR, REPOS_DIR)
 
 
 class AskRequest(BaseModel):
@@ -49,6 +54,13 @@ class RepoDownloadRequest(BaseModel):
 
 class ScanRequest(BaseModel):
     url: str
+
+
+class GraphRegenerateResponse(BaseModel):
+    repo_id: str
+    status: Literal["missing", "queued", "running", "complete", "failed"]
+    progress: int = 0
+    graph_version: str | None = None
 
 
 class SourceReference(BaseModel):
@@ -474,6 +486,213 @@ def scan_repo_endpoint(request: ScanRequest):
             status_code=500,
             detail=f"Repository scan failed: {exc}"
         ) from exc
+
+
+def _load_graph(repo_id: str) -> dict[str, Any]:
+    if not repo_id or not all(char in "0123456789abcdef" for char in repo_id) or len(repo_id) != 64:
+        raise HTTPException(status_code=400, detail="Invalid repository ID")
+    if not (REPOS_DIR / repo_id).is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found. Download it first.")
+    graph = graph_store.load(repo_id)
+    if graph is None:
+        raise HTTPException(status_code=404, detail="Graph has not been generated. Regenerate it first.")
+    return graph
+
+
+def _csv(value: str | None) -> set[str] | None:
+    if not value:
+        return None
+    return {part.strip().lower() for part in value.split(",") if part.strip()}
+
+
+def _filtered_graph(
+    graph: dict[str, Any], mode: str, search: str | None, types: str | None,
+    languages: str | None, include_isolated: bool, edge_types: str | None,
+    limit: int, offset: int,
+) -> dict[str, Any]:
+    type_filter, language_filter, edge_filter = _csv(types), _csv(languages), _csv(edge_types)
+    candidates = [
+        node for node in graph["nodes"]
+        if (not search or search.lower() in node["path"].lower())
+        and (not type_filter or node["type"].lower() in type_filter)
+        and (not language_filter or node["language"].lower() in language_filter)
+        and (include_isolated or node["degree"] > 0)
+    ]
+    if mode == "overview":
+        groups: dict[str, dict[str, Any]] = {}
+        for node in candidates:
+            group = node["path"].split("/", 1)[0] if "/" in node["path"] else "."
+            groups.setdefault(group, {"id": group, "label": group, "type": "module", "file_count": 0, "loc": 0})
+            groups[group]["file_count"] += 1
+            groups[group]["loc"] += node["loc"]
+        group_ids = set(groups)
+        edges = []
+        aggregated: Counter[tuple[str, str]] = Counter()
+        node_by_path = {node["id"]: node for node in candidates}
+        for edge in graph["edges"]:
+            if edge["source"] not in node_by_path or edge["target"] not in node_by_path:
+                continue
+            if edge_filter and edge["type"].lower() not in edge_filter:
+                continue
+            source = edge["source"].split("/", 1)[0] if "/" in edge["source"] else "."
+            target = edge["target"].split("/", 1)[0] if "/" in edge["target"] else "."
+            if source != target:
+                aggregated[(source, target)] += 1
+        for (source, target), count in aggregated.items():
+            edges.append({"id": f"{source}->{target}", "source": source, "target": target, "type": "imports",
+                          "label": "imports", "metadata": {"file_dependency_count": count}})
+        visible = list(groups.values())[offset:offset + limit]
+        visible_ids = {node["id"] for node in visible}
+        edges = [edge for edge in edges if edge["source"] in visible_ids and edge["target"] in visible_ids]
+        return {"nodes": visible, "edges": edges, "categories": dict(Counter(node["type"] for node in visible))}
+    visible = candidates[offset:offset + limit]
+    visible_ids = {node["id"] for node in visible}
+    edges = [
+        edge for edge in graph["edges"]
+        if edge["source"] in visible_ids and edge["target"] in visible_ids
+        and (not edge_filter or edge["type"].lower() in edge_filter)
+    ]
+    return {"nodes": visible, "edges": edges, "categories": dict(Counter(node["type"] for node in visible))}
+
+
+@app.get("/api/repo/{repo_id}/graph")
+def get_graph(
+    repo_id: str, mode: Literal["file_graph", "overview"] = "file_graph",
+    search: str | None = None, types: str | None = None, languages: str | None = None,
+    include_isolated: bool = True, include_external: bool = False,
+    edge_types: str | None = None, limit: int = 1000, offset: int = 0,
+):
+    if limit < 1 or limit > 5000 or offset < 0:
+        raise HTTPException(status_code=400, detail="limit must be 1-5000 and offset must be non-negative")
+    graph = _load_graph(repo_id)
+    visible = _filtered_graph(graph, mode, search, types, languages, include_isolated, edge_types, limit, offset)
+    metrics = dict(graph["metrics"])
+    metrics["visible_nodes"] = len(visible["nodes"])
+    metrics["visible_edges"] = len(visible["edges"])
+    metrics["filtered_density"] = (
+        len(visible["edges"]) / (len(visible["nodes"]) * (len(visible["nodes"]) - 1))
+        if len(visible["nodes"]) > 1 else 0
+    )
+    return {
+        "repo_id": repo_id, "mode": mode, "status": "complete",
+        "graph_version": graph["graph_version"], "nodes": visible["nodes"],
+        "edges": visible["edges"], "categories": visible["categories"],
+        "metrics": metrics, "full_graph_metrics": graph["metrics"],
+        "diagnostics_summary": dict(Counter(
+            "errors" if item["kind"] in {"parser_error", "read_error"} else "warnings"
+            for item in graph["diagnostics"]
+        )),
+        "external_included": False,
+    }
+
+
+@app.get("/api/repo/{repo_id}/graph/nodes/{node_id:path}")
+def get_graph_node(repo_id: str, node_id: str, preview_lines: int = 100, offset: int = 0,
+                   limit: int = 100, edge_types: str | None = None, incoming_depth: int = 1,
+                   outgoing_depth: int = 1, max_nodes: int = 200):
+    if node_id.endswith("/dependencies"):
+        return get_graph_dependencies(repo_id, node_id[:-len("/dependencies")], offset, limit, edge_types)
+    if node_id.endswith("/neighborhood"):
+        return get_graph_neighborhood(repo_id, node_id[:-len("/neighborhood")], incoming_depth,
+                                      outgoing_depth, max_nodes, edge_types)
+    graph = _load_graph(repo_id)
+    node_id = node_id.strip("/")
+    item = graph["files"].get(node_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Graph node not found")
+    if preview_lines < 1 or preview_lines > MAX_PREVIEW_LINES:
+        raise HTTPException(status_code=400, detail="preview_lines must be 1-200")
+    incoming = [edge for edge in graph["edges"] if edge["target"] == node_id]
+    outgoing = [edge for edge in graph["edges"] if edge["source"] == node_id]
+    source_preview = []
+    for number, line in enumerate(item["source"].splitlines()[:preview_lines], 1):
+        if re.search(r"(?:api[_-]?key|password|secret|token)\s*=", line, re.IGNORECASE):
+            line = "[redacted]"
+        source_preview.append({"line": number, "content": line})
+    node = next(node for node in graph["nodes"] if node["id"] == node_id)
+    return {
+        "node": node,
+        "imports_from": outgoing,
+        "imported_by": incoming,
+        "exports": item["exports"],
+        "source_preview": source_preview,
+        "diagnostics": [diagnostic for diagnostic in graph["diagnostics"]
+                        if diagnostic.get("path") == node_id or diagnostic.get("source") == node_id],
+    }
+
+
+@app.get("/api/repo/{repo_id}/graph/nodes/{node_id:path}/dependencies")
+def get_graph_dependencies(repo_id: str, node_id: str, offset: int = 0, limit: int = 100, edge_types: str | None = None):
+    graph = _load_graph(repo_id)
+    node_id = node_id.strip("/")
+    if node_id not in graph["files"]:
+        raise HTTPException(status_code=404, detail="Graph node not found")
+    allowed = _csv(edge_types)
+    outgoing = [edge for edge in graph["edges"] if edge["source"] == node_id and (not allowed or edge["type"].lower() in allowed)]
+    incoming = [edge for edge in graph["edges"] if edge["target"] == node_id and (not allowed or edge["type"].lower() in allowed)]
+    return {"node_id": node_id, "imports_from": outgoing[offset:offset + limit], "imported_by": incoming[offset:offset + limit],
+            "total_imports_from": len(outgoing), "total_imported_by": len(incoming)}
+
+
+@app.get("/api/repo/{repo_id}/graph/neighborhood/{node_id:path}")
+def get_graph_neighborhood(repo_id: str, node_id: str, incoming_depth: int = 1, outgoing_depth: int = 1,
+                           max_nodes: int = 200, edge_types: str | None = None):
+    graph = _load_graph(repo_id)
+    node_id = node_id.strip("/")
+    if node_id not in graph["files"]:
+        raise HTTPException(status_code=404, detail="Graph node not found")
+    if min(incoming_depth, outgoing_depth) < 0 or max_nodes < 1 or max_nodes > 1000:
+        raise HTTPException(status_code=400, detail="Invalid neighborhood bounds")
+    allowed = _csv(edge_types)
+    selected = {node_id}
+    queue = deque([(node_id, "in", 0), (node_id, "out", 0)])
+    while queue and len(selected) < max_nodes:
+        current, direction, depth = queue.popleft()
+        max_depth = incoming_depth if direction == "in" else outgoing_depth
+        if depth >= max_depth:
+            continue
+        edges = [edge for edge in graph["edges"] if
+                 (edge["target"] == current if direction == "in" else edge["source"] == current)
+                 and (not allowed or edge["type"].lower() in allowed)]
+        for edge in edges:
+            neighbor = edge["source"] if direction == "in" else edge["target"]
+            if neighbor not in selected:
+                selected.add(neighbor)
+                queue.append((neighbor, direction, depth + 1))
+                if len(selected) >= max_nodes:
+                    break
+    return {"node_id": node_id, "nodes": [node for node in graph["nodes"] if node["id"] in selected],
+            "edges": [edge for edge in graph["edges"] if edge["source"] in selected and edge["target"] in selected],
+            "incoming_depth": incoming_depth, "outgoing_depth": outgoing_depth}
+
+
+@app.get("/api/repo/{repo_id}/graph/diagnostics")
+def get_graph_diagnostics(repo_id: str):
+    graph = _load_graph(repo_id)
+    return {"repo_id": repo_id, "diagnostics": graph["diagnostics"],
+            "unresolved_imports": [item for item in graph["diagnostics"] if item["kind"] == "unresolved_import"],
+            "ambiguous_imports": [item for item in graph["diagnostics"] if item["kind"] == "ambiguous_import"],
+            "parser_failures": [item for item in graph["diagnostics"] if item["kind"] == "parser_error"],
+            "circular_dependencies": graph["metrics"]["strongly_connected_components"]}
+
+
+@app.post("/api/repo/{repo_id}/graph/regenerate", response_model=GraphRegenerateResponse)
+def regenerate_graph(repo_id: str):
+    if not re.fullmatch(r"[a-f0-9]{64}", repo_id) or not (REPOS_DIR / repo_id).is_dir():
+        raise HTTPException(status_code=404, detail="Repository not found")
+    try:
+        return graph_store.regenerate(repo_id)
+    except GraphAnalysisError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to persist graph: {exc}") from exc
+
+
+@app.get("/api/repo/{repo_id}/graph/status", response_model=GraphRegenerateResponse)
+def graph_status(repo_id: str):
+    if not re.fullmatch(r"[a-f0-9]{64}", repo_id):
+        raise HTTPException(status_code=400, detail="Invalid repository ID")
+    return graph_store.status(repo_id)
 
 
 

@@ -50,3 +50,20 @@ export function askRepository(question) {
       };
     });
 }
+
+export function getRepositoryGraph(repoId, params = {}) {
+  const query = new URLSearchParams({ mode: 'file_graph', limit: '500', ...params });
+  return request(`/api/repo/${encodeURIComponent(repoId)}/graph?${query.toString()}`);
+}
+
+export function getGraphNode(repoId, nodeId) {
+  return request(`/api/repo/${encodeURIComponent(repoId)}/graph/nodes/${nodeId.split('/').map(encodeURIComponent).join('/')}`);
+}
+
+export function regenerateRepositoryGraph(repoId) {
+  return request(`/api/repo/${encodeURIComponent(repoId)}/graph/regenerate`, { method: 'POST' });
+}
+
+export function getGraphStatus(repoId) {
+  return request(`/api/repo/${encodeURIComponent(repoId)}/graph/status`);
+}
