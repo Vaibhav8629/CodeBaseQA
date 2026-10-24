@@ -27,6 +27,14 @@ SUPPORTED = {
     ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp", ".java": "java",
     ".go": "go", ".rs": "rust", ".php": "php",
 }
+PYTHON_SUFFIXES = (".py",)
+JAVASCRIPT_SUFFIXES = (
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+)
+GENERIC_SUFFIXES = (
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx",
+    ".java", ".go", ".rs", ".php",
+)
 IGNORED_DIRS = {
     ".git", "node_modules", "venv", ".venv", "env", "__pycache__",
     "dist", "build", "coverage", ".next", ".cache", "target", "vendor",
@@ -94,7 +102,22 @@ def _imports(source: str, language: str) -> tuple[list[dict[str, Any]], list[str
                         imports.append({"raw": alias.name, "line": node.lineno, "kind": "import"})
                 elif isinstance(node, ast.ImportFrom):
                     prefix = "." * node.level + (node.module or "")
-                    imports.append({"raw": prefix, "line": node.lineno, "kind": "from"})
+                    if node.module:
+                        imports.append({"raw": prefix, "line": node.lineno, "kind": "from"})
+                        if node.level:
+                            for alias in node.names:
+                                imports.append({
+                                    "raw": f"{prefix}.{alias.name}",
+                                    "line": node.lineno,
+                                    "kind": "from-relative-member",
+                                })
+                    else:
+                        for alias in node.names:
+                            imports.append({
+                                "raw": prefix + alias.name,
+                                "line": node.lineno,
+                                "kind": "from",
+                            })
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     if not node.name.startswith("_"):
                         exports.append(node.name)
@@ -134,11 +157,13 @@ class DependencyGraphAnalyzer:
         self.files: dict[str, dict[str, Any]] = {}
         self.diagnostics: list[dict[str, Any]] = []
         self.aliases: dict[str, list[str]] = {}
+        self.base_url = ""
         tsconfig = self.repo_path / "tsconfig.json"
         if tsconfig.is_file():
             try:
                 compiler = json.loads(tsconfig.read_text(encoding="utf-8")).get("compilerOptions", {})
                 self.aliases = compiler.get("paths", {}) if isinstance(compiler.get("paths", {}), dict) else {}
+                self.base_url = compiler.get("baseUrl", "") if isinstance(compiler.get("baseUrl", ""), str) else ""
             except (OSError, json.JSONDecodeError):
                 self.diagnostics.append({"kind": "parser_error", "path": "tsconfig.json", "message": "Invalid tsconfig.json"})
 
@@ -146,7 +171,7 @@ class DependencyGraphAnalyzer:
         if not self.repo_path.is_dir():
             raise GraphAnalysisError("Repository does not exist")
         count = 0
-        for path in self.repo_path.rglob("*"):
+        for path in sorted(self.repo_path.rglob("*")):
             if count >= MAX_FILES:
                 self.diagnostics.append({"kind": "scan_limit", "message": f"Maximum of {MAX_FILES} files reached"})
                 break
@@ -175,45 +200,105 @@ class DependencyGraphAnalyzer:
             }
             count += 1
 
-    def _resolve(self, source_path: str, raw: str) -> tuple[str | None, str]:
-        raw = raw.replace("\\", "/")
-        candidates: list[str] = []
+    def _candidates(self, base: PurePosixPath, suffixes: tuple[str, ...],
+                    include_index: bool = False) -> list[str]:
+        base_str = base.as_posix().lstrip("./")
+        candidates = [base_str]
+        candidates.extend(base_str + suffix for suffix in suffixes)
+        if include_index:
+            candidates.extend(base_str + "/index" + suffix for suffix in suffixes)
+        return list(dict.fromkeys(candidates))
+
+    def _resolve_candidates(self, source_path: str, raw: str,
+                            candidates: list[str]) -> tuple[str | None, str]:
+        found = [candidate for candidate in candidates if candidate in self.files]
+        if len(found) == 1:
+            return found[0], "resolved"
+        if len(found) > 1:
+            self.diagnostics.append({
+                "kind": "ambiguous_import", "source": source_path,
+                "import": raw, "candidates": found,
+            })
+            return None, "ambiguous"
+        return None, "unresolved"
+
+    def _resolve_python(self, source_path: str, raw: str) -> tuple[str | None, str]:
         source_dir = PurePosixPath(source_path).parent
         if raw.startswith("."):
             levels = len(raw) - len(raw.lstrip("."))
             base = source_dir
             for _ in range(max(0, levels - 1)):
                 base = base.parent
-            module = raw[levels:].lstrip("/")
-            base = base.joinpath(module) if module else base
+            module = raw[levels:].lstrip("/").replace(".", "/")
+            base = base / module if module else base
+            candidates = self._candidates(base, PYTHON_SUFFIXES)
         else:
-            base = PurePosixPath(raw)
-            # Project-root imports and Python packages are both supported.
-            if raw.startswith("@/"):
+            # Try a filesystem-shaped name first. This preserves directory names
+            # containing dots or numeric prefixes.
+            candidates = self._candidates(PurePosixPath(raw), PYTHON_SUFFIXES)
+            dotted = PurePosixPath(raw.replace(".", "/"))
+            candidates.extend(self._candidates(dotted, PYTHON_SUFFIXES))
+            candidates.extend(self._candidates(PurePosixPath(raw) / "__init__", PYTHON_SUFFIXES))
+            candidates.extend(self._candidates(dotted / "__init__", PYTHON_SUFFIXES))
+        return self._resolve_candidates(source_path, raw, list(dict.fromkeys(candidates)))
+
+    def _resolve_javascript(self, source_path: str, raw: str) -> tuple[str | None, str]:
+        source_dir = PurePosixPath(source_path).parent
+        base: PurePosixPath | None = None
+        local_like = raw.startswith((".", "/", "@/")) or "/" in raw
+        if raw.startswith("."):
+            base = source_dir / raw
+        else:
+            for alias, targets in self.aliases.items():
+                prefix = alias.removesuffix("/*")
+                if raw == prefix or raw.startswith(prefix + "/"):
+                    target = targets[0] if targets else ""
+                    base = PurePosixPath(target.removesuffix("/*")) / raw[len(prefix):].lstrip("/")
+                    local_like = True
+                    break
+            if base is None and raw.startswith("@/"):
                 base = PurePosixPath(raw[2:])
-            else:
-                for alias, targets in self.aliases.items():
-                    prefix = alias.removesuffix("/*")
-                    if raw == prefix or raw.startswith(prefix + "/"):
-                        target = targets[0] if targets else ""
-                        base = PurePosixPath(target.removesuffix("/*")) / raw[len(prefix):].lstrip("/")
-                        break
-        base_str = base.as_posix().lstrip("./")
-        if not raw.startswith(".") and "/" not in raw and "." in raw:
-            base_str = raw.replace(".", "/")
-        suffixes = ["", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".c", ".h", ".cpp", ".java", ".go", ".rs", ".php"]
-        for suffix in suffixes:
-            candidates.append(base_str + suffix)
-        for suffix in suffixes[1:]:
-            candidates.append(base_str + "/index" + suffix)
-        candidates.append(base_str + "/__init__.py")
-        found = [candidate for candidate in dict.fromkeys(candidates) if candidate in self.files]
-        if len(found) == 1:
-            return found[0], "resolved"
-        if len(found) > 1:
-            self.diagnostics.append({"kind": "ambiguous_import", "source": source_path, "import": raw, "candidates": found})
-            return None, "ambiguous"
-        return None, "external" if not raw.startswith(".") else "unresolved"
+                local_like = True
+            if base is None and self.base_url:
+                base = PurePosixPath(self.base_url) / raw
+                local_like = True
+            if base is None and raw.startswith("/"):
+                base = PurePosixPath(raw.lstrip("/"))
+        if base is None:
+            return None, "external"
+        target, status = self._resolve_candidates(
+            source_path, raw, self._candidates(base, JAVASCRIPT_SUFFIXES, include_index=True)
+        )
+        return target, status
+
+    def _resolve_generic(self, source_path: str, raw: str) -> tuple[str | None, str]:
+        base = PurePosixPath(raw.replace("\\", "/"))
+        target, status = self._resolve_candidates(
+            source_path, raw, self._candidates(base, GENERIC_SUFFIXES)
+        )
+        return target, status
+
+    def _resolve(self, source_path: str, raw: str) -> tuple[str | None, str]:
+        language = self.files[source_path]["language"]
+        if language == "python":
+            target, status = self._resolve_python(source_path, raw)
+            if target or status == "ambiguous":
+                return target, status
+            if raw.startswith("."):
+                return None, "unresolved"
+            first = raw.replace("\\", "/").split("/", 1)[0].split(".", 1)[0]
+            top_level = {
+                PurePosixPath(path).parts[0]
+                for path in self.files
+                if PurePosixPath(path).parts
+            }
+            return None, "unresolved" if first in top_level else "external"
+        if language in {"javascript", "typescript"}:
+            return self._resolve_javascript(source_path, raw)
+        target, status = self._resolve_generic(source_path, raw)
+        if target or status == "ambiguous":
+            return target, status
+        return None, "unresolved" if raw.startswith((".", "/")) else "external"
 
     def analyze(self) -> dict[str, Any]:
         self._scan_files()
@@ -222,6 +307,8 @@ class DependencyGraphAnalyzer:
             for import_item in item["imports"]:
                 target, status = self._resolve(source_path, import_item["raw"])
                 if not target:
+                    if status == "ambiguous":
+                        continue
                     self.diagnostics.append({
                         "kind": "unresolved_import" if status != "external" else "external_import",
                         "source": source_path, "import": import_item["raw"],
@@ -229,7 +316,7 @@ class DependencyGraphAnalyzer:
                     })
                     continue
                 edges.append({
-                    "id": f"{source_path}->{target}:{import_item['line']}",
+                    "id": f"{source_path}->{target}:{import_item['line']}:{import_item['raw']}",
                     "source": source_path, "target": target, "type": "imports",
                     "label": "imports", "metadata": {
                         "import_statement": import_item["raw"], "line": import_item["line"],
