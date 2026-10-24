@@ -1,9 +1,9 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+import { apiUrl } from './config';
 
 async function request(path, options) {
   let response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(apiUrl(path), {
       headers: { 'Content-Type': 'application/json', ...options?.headers },
       ...options,
     });

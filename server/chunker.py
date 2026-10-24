@@ -3,12 +3,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 from git import Repo, GitCommandError
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
-from config import CHROMA_DIR
+from config import CHROMA_DIR,SERVER_DIR
 import hashlib
 
-
-BASE_DIR = Path(__file__).resolve().parent
-REPOS_DIR = BASE_DIR / "repositories"
+BASE_DIR = SERVER_DIR
+REPOS_DIR = SERVER_DIR / "repos"
 
 IGNORED_DIRS = {
     ".git", "node_modules", "venv", ".venv",

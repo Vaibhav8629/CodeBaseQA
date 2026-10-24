@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from dependency_graph import GraphAnalysisError, GraphStore, MAX_PREVIEW_LINES
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 
 app = FastAPI(
@@ -29,7 +30,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", FRONTEND_URL] if FRONTEND_URL else ["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]

@@ -169,6 +169,10 @@ function Message({ message, repoId, onViewInGraph, onRetry }) {
 
 function ConnectForm({ value, onChange, onSubmit, busy, error, onDismiss, reindex }) {
   return <form className="cq-connect" onSubmit={onSubmit}>
+    <div className="cq-connect-notice" role="note">
+      <p><strong>Note:</strong> Please submit small repositories only, as this demo uses the Gemini Free API tier, which has limited usage quotas. Indexing large repositories may quickly exhaust the available quota and temporarily prevent further requests.</p>
+      <p>For larger repositories or unrestricted usage, please clone <a href="https://github.com/Vaibhav8629/CodeBaseQA" target="_blank" rel="noreferrer">this project</a> and run it locally with your own API key. You can replace the free-tier Gemini API key with a paid-tier API key to access higher usage limits.</p>
+    </div>
     <div className="cq-connect-field">
       <GitBranch size={16} />
       <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="https://github.com/owner/repository" aria-label="GitHub repository URL" disabled={busy} />

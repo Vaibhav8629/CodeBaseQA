@@ -83,6 +83,11 @@
 .cq-suggestion:hover:not(:disabled) .cq-suggestion-arrow { color: var(--cq-accent); }
 .cq-suggestion:active:not(:disabled) { transform: translateY(0) scale(.985); }
 .cq-connect { width: 100%; margin-top: 14px; }
+.cq-connect-notice { margin-bottom: 10px; padding: 10px 12px; border: 1px solid rgba(195, 245, 60, .25); border-radius: 10px; background: rgba(195, 245, 60, .06); color: var(--cq-muted); font-size: 12px; line-height: 1.5; text-align: left; }
+.cq-connect-notice p + p { margin-top: 6px; }
+.cq-connect-notice strong { color: var(--cq-text); font-weight: 600; }
+.cq-connect-notice a { color: var(--cq-accent); text-decoration: underline; text-underline-offset: 2px; }
+.cq-connect-notice a:hover { color: #d2ff50; }
 .cq-connect-field { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border: 1px solid var(--cq-border); border-radius: 12px; background: var(--cq-surface); color: var(--cq-muted); transition: border-color .15s, box-shadow .15s; }
 .cq-connect-field:focus-within { border-color: rgba(195, 245, 60, .55); box-shadow: 0 0 0 3px var(--cq-accent-soft); }
 .cq-connect-field input { flex: 1; min-width: 0; color: var(--cq-text); }
