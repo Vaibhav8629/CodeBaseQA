@@ -455,7 +455,7 @@ def scan_repo_endpoint(request: ScanRequest):
 
         graph_result = graph_store.regenerate(repo_id)
 
-        print("Graph status:", graph_result.status)
+        print("Graph status:", graph_result["status"])
 
         print("Vectorstore collection count after:", vectorstore._collection.count())
 
@@ -468,8 +468,8 @@ def scan_repo_endpoint(request: ScanRequest):
             "new_or_updated_chunks": len(changed_documents),
             "deleted_chunks": len(stale_ids),
             "unchanged_chunks": len(current_ids) - len(changed_documents),
-            "graph_status": graph_result.status,
-            "graph_version": graph_result.graph_version
+            "graph_status": graph_result["status"],
+            "graph_version": graph_result["graph_version"]
         }
 
     except HTTPException:
