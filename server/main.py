@@ -14,7 +14,7 @@ import re
 from collections import Counter, deque
 
 from chunker import scan_repository
-from config import CHROMA_COLLECTION, CHROMA_DIR, SERVER_DIR
+from config import SERVER_DIR, CHROMA_DIR, CHROMA_COLLECTION, REPOS_DIR, GRAPH_DIR
 from dotenv import load_dotenv
 from dependency_graph import GraphAnalysisError, GraphStore, MAX_PREVIEW_LINES
 
@@ -37,11 +37,10 @@ app.add_middleware(
 )
 
 
-REPOS_DIR = SERVER_DIR / "repos"
-
 REPOS_DIR.mkdir(parents=True, exist_ok=True)
+GRAPH_DIR.mkdir(parents=True, exist_ok=True)
 CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-GRAPH_DIR = SERVER_DIR / "graph_data"
+
 graph_store = GraphStore(GRAPH_DIR, REPOS_DIR)
 
 
@@ -451,6 +450,12 @@ def scan_repo_endpoint(request: ScanRequest):
                 documents=changed_documents,
                 ids=changed_ids
             )
+            
+        print("Generating dependency graph...")
+
+        graph_result = graph_store.regenerate(repo_id)
+
+        print("Graph status:", graph_result.status)
 
         print("Vectorstore collection count after:", vectorstore._collection.count())
 
@@ -462,7 +467,9 @@ def scan_repo_endpoint(request: ScanRequest):
             "total_chunks": len(chunks),
             "new_or_updated_chunks": len(changed_documents),
             "deleted_chunks": len(stale_ids),
-            "unchanged_chunks": len(current_ids) - len(changed_documents)
+            "unchanged_chunks": len(current_ids) - len(changed_documents),
+            "graph_status": graph_result.status,
+            "graph_version": graph_result.graph_version
         }
 
     except HTTPException:
